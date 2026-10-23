@@ -31,11 +31,11 @@ type User struct {
 }
 
 type Chirp struct {
-	ID        uuid.UUID     `json:"id"`
-	Body      string        `json:"body"`
-	UserID    uuid.NullUUID `json:"user_id"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	ID        uuid.UUID `json:"id"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -75,10 +75,85 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(http.StatusText(http.StatusOK)))
 }
 
+func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	rows, err := cfg.db.GetChirps(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(message)
+		return
+	}
+	chirps := []Chirp{}
+
+	for _, row := range rows {
+		chirps = append(chirps, Chirp{
+			ID:        row.ID,
+			Body:      row.Body,
+			UserID:    row.UserID,
+			CreatedAt: row.CreatedAt,
+			UpdatedAt: row.UpdatedAt,
+		})
+	}
+	dat, err := json.Marshal(chirps)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(message)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	userId := r.PathValue("chirpID")
+	parsedUUID, err := uuid.Parse(userId)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(message)
+		return
+	}
+	chirp, err := cfg.db.GetChirp(r.Context(), parsedUUID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusNotFound)})
+		w.Write(message)
+		return
+	}
+	dat, err := json.Marshal(Chirp{
+		ID:        chirp.ID,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(message)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(dat)
+}
+
 func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		Body   string        `json:"body"`
-		UserID uuid.NullUUID `json:"user_id"`
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
 	type errorResponse struct {
 		Error string `json:"error"`
@@ -192,10 +267,16 @@ func main() {
 	fileServer := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(fileServer))
+
 	mux.HandleFunc("GET /admin/metrics", apiConfig.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiConfig.handlerReset)
+
 	mux.HandleFunc("POST /api/users", apiConfig.handlerCreateUser)
+
+	mux.HandleFunc("GET /api/chirps", apiConfig.handlerGetChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.handlerGetChirp)
 	mux.HandleFunc("POST /api/chirps", apiConfig.handlerCreateChirp)
+
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
