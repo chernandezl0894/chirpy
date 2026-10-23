@@ -1,16 +1,41 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/chernandezl0894/chirpy/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	platform       string
+	db             *database.Queries
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Chirp struct {
+	ID        uuid.UUID     `json:"id"`
+	Body      string        `json:"body"`
+	UserID    uuid.NullUUID `json:"user_id"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -34,70 +59,143 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(http.StatusText(http.StatusForbidden)))
+		return
+	}
 	cfg.fileserverHits.Store(0)
+	err := cfg.db.DeleteAllUsers(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(http.StatusText(http.StatusInternalServerError)))
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Hits reset to 0"))
+	w.Write([]byte(http.StatusText(http.StatusOK)))
+}
+
+func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Body   string        `json:"body"`
+		UserID uuid.NullUUID `json:"user_id"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	decoder := json.NewDecoder(r.Body)
+	params := request{}
+	err := decoder.Decode(&params)
+	badWords := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
+
+	var dat []byte
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+		w.Write(dat)
+		return
+	}
+
+	if len(params.Body) > 140 {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ = json.Marshal(errorResponse{Error: "Chirp is too long"})
+		w.Write(dat)
+		return
+	}
+	createChirpParams := database.CreateChirpParams{
+		Body:   getCleanedMessage(params.Body, badWords),
+		UserID: params.UserID,
+	}
+	chirp, err := cfg.db.CreateChirp(r.Context(), createChirpParams)
+	dat, err = json.Marshal(Chirp{
+		ID:        chirp.ID,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Email string `json:"email"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	decoder := json.NewDecoder(r.Body)
+	params := request{}
+	err := decoder.Decode(&params)
+
+	var dat []byte
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+		w.Write(dat)
+		return
+	}
+
+	user, err := cfg.db.CreateUser(r.Context(), params.Email)
+	dat, err = json.Marshal(User{
+		ID:        user.ID,
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	w.Write(dat)
 }
 
 func main() {
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Something went wrong")
+		os.Exit(1)
+	}
+	dbQueries := database.New(db)
+
 	port := "8080"
 	apiConfig := apiConfig{
 		fileserverHits: atomic.Int32{},
+		platform:       platform,
+		db:             dbQueries,
 	}
 	fileServer := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(fileServer))
 	mux.HandleFunc("GET /admin/metrics", apiConfig.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiConfig.handlerReset)
-	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
-		type parameters struct {
-			Body string `json:"body"`
-		}
-		type returnVals struct {
-			CleanedBody string `json:"cleaned_body"`
-		}
-		type errorResponse struct {
-			Error string `json:"error"`
-		}
-		badWords := map[string]struct{}{
-			"kerfuffle": {},
-			"sharbert":  {},
-			"fornax":    {},
-		}
-		w.Header().Set("Content-Type", "application/json")
-
-		decoder := json.NewDecoder(r.Body)
-		params := parameters{}
-		err := decoder.Decode(&params)
-
-		var dat []byte
-
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			dat, _ := json.Marshal(errorResponse{Error: "Something went wrong"})
-			w.Write(dat)
-			return
-		}
-
-		if len(params.Body) > 140 {
-			w.WriteHeader(http.StatusBadRequest)
-			dat, _ = json.Marshal(errorResponse{Error: "Chirp is too long"})
-			w.Write(dat)
-			return
-		}
-
-		dat, err = json.Marshal(returnVals{
-			CleanedBody: getCleanedMessage(params.Body, badWords),
-		})
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			dat, _ = json.Marshal(errorResponse{Error: "Something went wrong"})
-			w.Write(dat)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write(dat)
-	})
+	mux.HandleFunc("POST /api/users", apiConfig.handlerCreateUser)
+	mux.HandleFunc("POST /api/chirps", apiConfig.handlerCreateChirp)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
