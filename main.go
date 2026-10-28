@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	auth "github.com/chernandezl0894/chirpy/internal/auth"
 	"github.com/chernandezl0894/chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -20,6 +21,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	platform       string
+	tokenString    string
 	db             *database.Queries
 }
 
@@ -152,17 +154,32 @@ func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 	type errorResponse struct {
 		Error string `json:"error"`
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+	userID, err := auth.ValidateJWT(tokenString, cfg.tokenString)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := request{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	badWords := map[string]struct{}{
 		"kerfuffle": {},
 		"sharbert":  {},
@@ -186,7 +203,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	}
 	createChirpParams := database.CreateChirpParams{
 		Body:   getCleanedMessage(params.Body, badWords),
-		UserID: params.UserID,
+		UserID: userID,
 	}
 	chirp, err := cfg.db.CreateChirp(r.Context(), createChirpParams)
 	dat, err = json.Marshal(Chirp{
@@ -206,9 +223,92 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	type response struct {
+		ID        uuid.UUID `json:"id"`
+		Email     string    `json:"email"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Token     string    `json:"token"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	decoder := json.NewDecoder(r.Body)
+	params := request{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+		w.Write(dat)
+		return
+	}
+	var dat []byte
+
+	user, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+	found, err := auth.CheckPassword(params.Password, user.HashedPassword)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	if found {
+		const maxLifetime = time.Hour
+
+		lifetime := time.Duration(params.ExpiresInSeconds) * time.Second
+		if params.ExpiresInSeconds <= 0 || lifetime > maxLifetime {
+			lifetime = maxLifetime
+		}
+
+		tokenString, err := auth.MakeJWT(user.ID, cfg.tokenString, lifetime)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+			w.Write(dat)
+			return
+		}
+
+		dat, err = json.Marshal(response{
+			ID:        user.ID,
+			Email:     user.Email,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Token:     tokenString,
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+			w.Write(dat)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write(dat)
+	} else {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+	}
+}
+
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
 	type request struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	type errorResponse struct {
 		Error string `json:"error"`
@@ -228,7 +328,17 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	user, err := cfg.db.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+	user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
 	dat, err = json.Marshal(User{
 		ID:        user.ID,
 		Email:     user.Email,
@@ -250,6 +360,7 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	tokenString := os.Getenv("TOKEN_STRING")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -263,6 +374,7 @@ func main() {
 		fileserverHits: atomic.Int32{},
 		platform:       platform,
 		db:             dbQueries,
+		tokenString:    tokenString,
 	}
 	fileServer := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	mux := http.NewServeMux()
@@ -270,6 +382,8 @@ func main() {
 
 	mux.HandleFunc("GET /admin/metrics", apiConfig.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiConfig.handlerReset)
+
+	mux.HandleFunc("POST /api/login", apiConfig.handlerLogin)
 
 	mux.HandleFunc("POST /api/users", apiConfig.handlerCreateUser)
 
