@@ -45,6 +45,25 @@ func GetBearerToken(headers http.Header) (string, error) {
 	return token, nil
 }
 
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("missing Authorization header")
+	}
+
+	key, found := strings.CutPrefix(authHeader, "ApiKey ")
+	if !found {
+		return "", fmt.Errorf("invalid Authorization header: %q", authHeader)
+	}
+
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", errors.New("missing API key in Authorization header")
+	}
+
+	return key, nil
+}
+
 func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
 	type CustomClaims struct {
 		jwt.RegisteredClaims

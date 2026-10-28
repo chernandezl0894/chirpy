@@ -195,6 +195,59 @@ func TestGetBearerTokenEmptyToken(t *testing.T) {
 	}
 }
 
+func TestGetAPIKey(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "ApiKey abc123key")
+
+	key, err := GetAPIKey(headers)
+	if err != nil {
+		t.Fatalf("GetAPIKey returned unexpected error: %v", err)
+	}
+	if key != "abc123key" {
+		t.Errorf("expected key %q, got %q", "abc123key", key)
+	}
+}
+
+func TestGetAPIKeyStripsWhitespace(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "ApiKey   spaced-key \t ")
+
+	key, err := GetAPIKey(headers)
+	if err != nil {
+		t.Fatalf("GetAPIKey returned unexpected error: %v", err)
+	}
+	if key != "spaced-key" {
+		t.Errorf("expected key %q, got %q", "spaced-key", key)
+	}
+}
+
+func TestGetAPIKeyMissingHeader(t *testing.T) {
+	_, err := GetAPIKey(http.Header{})
+	if err == nil {
+		t.Fatal("expected an error when the Authorization header is missing")
+	}
+}
+
+func TestGetAPIKeyMissingApiKeyPrefix(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer abc123key")
+
+	_, err := GetAPIKey(headers)
+	if err == nil {
+		t.Fatal("expected an error when the ApiKey prefix is missing")
+	}
+}
+
+func TestGetAPIKeyEmptyKey(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "ApiKey ")
+
+	_, err := GetAPIKey(headers)
+	if err == nil {
+		t.Fatal("expected an error when the API key is empty")
+	}
+}
+
 func TestHashPassword(t *testing.T) {
 	hash, err := HashPassword("my-secret-password")
 	if err != nil {

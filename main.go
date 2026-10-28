@@ -23,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	platform       string
 	tokenString    string
+	polkaKey       string
 	db             *database.Queries
 }
 
@@ -617,9 +618,17 @@ func (cfg *apiConfig) handlerPolkaWebhook(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil || apiKey != cfg.polkaKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := request{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
@@ -655,6 +664,7 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	tokenString := os.Getenv("TOKEN_STRING")
+	polkaKey := os.Getenv("POLKA_KEY")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -669,6 +679,7 @@ func main() {
 		platform:       platform,
 		db:             dbQueries,
 		tokenString:    tokenString,
+		polkaKey:       polkaKey,
 	}
 	fileServer := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	mux := http.NewServeMux()
