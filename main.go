@@ -470,6 +470,78 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 	w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+	userID, err := auth.ValidateJWT(tokenString, cfg.tokenString)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := request{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+		w.Write(dat)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+
+	user, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+		ID:             userID,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+
+	dat, err := json.Marshal(User{
+		ID:        user.ID,
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(dat)
+}
+
 func main() {
 	godotenv.Load()
 
@@ -503,6 +575,7 @@ func main() {
 	mux.HandleFunc("POST /api/revoke", apiConfig.handlerRevoke)
 
 	mux.HandleFunc("POST /api/users", apiConfig.handlerCreateUser)
+	mux.HandleFunc("PUT /api/users", apiConfig.handlerUpdateUser)
 
 	mux.HandleFunc("GET /api/chirps", apiConfig.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.handlerGetChirp)
