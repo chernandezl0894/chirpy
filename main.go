@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,10 +27,11 @@ type apiConfig struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	Email     string    `json:"email"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          uuid.UUID `json:"id"`
+	Email       string    `json:"email"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -382,6 +384,7 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		Email        string    `json:"email"`
 		CreatedAt    time.Time `json:"created_at"`
 		UpdatedAt    time.Time `json:"updated_at"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
 	}
@@ -457,6 +460,7 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 			Email:        user.Email,
 			CreatedAt:    user.CreatedAt,
 			UpdatedAt:    user.UpdatedAt,
+			IsChirpyRed:  user.IsChirpyRed,
 			Token:        tokenString,
 			RefreshToken: refreshToken,
 		})
@@ -510,10 +514,11 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		HashedPassword: hashedPassword,
 	})
 	dat, err = json.Marshal(User{
-		ID:        user.ID,
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
+		ID:          user.ID,
+		Email:       user.Email,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		IsChirpyRed: user.IsChirpyRed,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -582,10 +587,11 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	dat, err := json.Marshal(User{
-		ID:        user.ID,
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
+		ID:          user.ID,
+		Email:       user.Email,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		IsChirpyRed: user.IsChirpyRed,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -595,6 +601,52 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write(dat)
+}
+
+func (cfg *apiConfig) handlerPolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	type data struct {
+		UserID uuid.UUID `json:"user_id"`
+	}
+	type request struct {
+		Event string `json:"event"`
+		Data  data   `json:"data"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	decoder := json.NewDecoder(r.Body)
+	params := request{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+		w.Write(dat)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	_, err = cfg.db.SetUserToChirpyRedByID(r.Context(), params.Data.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.WriteHeader(http.StatusNotFound)
+			dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusNotFound)})
+			w.Write(dat)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -631,6 +683,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", apiConfig.handlerCreateUser)
 	mux.HandleFunc("PUT /api/users", apiConfig.handlerUpdateUser)
+
+	mux.HandleFunc("POST /api/polka/webhooks", apiConfig.handlerPolkaWebhook)
 
 	mux.HandleFunc("GET /api/chirps", apiConfig.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.handlerGetChirp)
