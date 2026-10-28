@@ -223,6 +223,61 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+	userID, err := auth.ValidateJWT(tokenString, cfg.tokenString)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+		w.Write(dat)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusNotFound)})
+		w.Write(dat)
+		return
+	}
+
+	if chirp.UserID != userID {
+		w.WriteHeader(http.StatusForbidden)
+		dat, _ := json.Marshal(errorResponse{Error: "You can only delete your own chirps"})
+		w.Write(dat)
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 	type errorResponse struct {
 		Error string `json:"error"`
@@ -580,6 +635,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiConfig.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.handlerGetChirp)
 	mux.HandleFunc("POST /api/chirps", apiConfig.handlerCreateChirp)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiConfig.handlerDeleteChirp)
 
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
