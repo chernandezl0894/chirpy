@@ -223,6 +223,96 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	err = cfg.db.RevokeRefreshToken(r.Context(), database.RevokeRefreshTokenParams{
+		RevokedAt: sql.NullTime{Time: time.Now().UTC(), Valid: true},
+		Token:     refreshToken,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) handlerRefresh(w http.ResponseWriter, r *http.Request) {
+	type response struct {
+		Token string `json:"token"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	var dat []byte
+
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	storedToken, err := cfg.db.GetRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	if storedToken.RevokedAt.Valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	if time.Now().UTC().After(storedToken.ExpiresAt) {
+		w.WriteHeader(http.StatusUnauthorized)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusUnauthorized)})
+		w.Write(dat)
+		return
+	}
+
+	tokenString, err := auth.MakeJWT(storedToken.UserID, cfg.tokenString, time.Hour)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+
+	dat, err = json.Marshal(response{
+		Token: tokenString,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+		w.Write(dat)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(dat)
+}
+
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type request struct {
 		Email            string `json:"email"`
@@ -233,11 +323,12 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		Error string `json:"error"`
 	}
 	type response struct {
-		ID        uuid.UUID `json:"id"`
-		Email     string    `json:"email"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Token     string    `json:"token"`
+		ID           uuid.UUID `json:"id"`
+		Email        string    `json:"email"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -283,12 +374,36 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		refreshToken := auth.MakeRefreshToken()
+		if refreshToken == "" {
+			w.WriteHeader(http.StatusInternalServerError)
+			dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+			w.Write(dat)
+			return
+		}
+
+		now := time.Now().UTC()
+		err = cfg.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+			Token:     refreshToken,
+			CreatedAt: now,
+			UpdatedAt: now,
+			UserID:    user.ID,
+			ExpiresAt: now.Add(60 * 24 * time.Hour),
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			dat, _ = json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
+			w.Write(dat)
+			return
+		}
+
 		dat, err = json.Marshal(response{
-			ID:        user.ID,
-			Email:     user.Email,
-			CreatedAt: user.CreatedAt,
-			UpdatedAt: user.UpdatedAt,
-			Token:     tokenString,
+			ID:           user.ID,
+			Email:        user.Email,
+			CreatedAt:    user.CreatedAt,
+			UpdatedAt:    user.UpdatedAt,
+			Token:        tokenString,
+			RefreshToken: refreshToken,
 		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -384,6 +499,8 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiConfig.handlerReset)
 
 	mux.HandleFunc("POST /api/login", apiConfig.handlerLogin)
+	mux.HandleFunc("POST /api/refresh", apiConfig.handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", apiConfig.handlerRevoke)
 
 	mux.HandleFunc("POST /api/users", apiConfig.handlerCreateUser)
 
