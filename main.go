@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -86,7 +87,22 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	rows, err := cfg.db.GetChirps(r.Context())
+	var rows []database.Chirp
+	var err error
+
+	authorID := r.URL.Query().Get("author_id")
+	if authorID != "" {
+		parsedUUID, err := uuid.Parse(authorID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusBadRequest)})
+			w.Write(message)
+			return
+		}
+		rows, err = cfg.db.GetChirpsByUserID(r.Context(), parsedUUID)
+	} else {
+		rows, err = cfg.db.GetChirps(r.Context())
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		message, _ := json.Marshal(errorResponse{Error: http.StatusText(http.StatusInternalServerError)})
@@ -104,6 +120,27 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: row.UpdatedAt,
 		})
 	}
+
+	sortOrder := r.URL.Query().Get("sort")
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+	switch sortOrder {
+	case "asc":
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+		})
+	case "desc":
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		})
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		message, _ := json.Marshal(errorResponse{Error: "invalid sort order: must be asc or desc"})
+		w.Write(message)
+		return
+	}
+
 	dat, err := json.Marshal(chirps)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
